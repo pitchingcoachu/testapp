@@ -1,5 +1,8 @@
 name: Daily LSU Data Sync and Deploy
 
+permissions:
+  contents: write
+
 on:
   schedule:
     - cron: '0 21 * * *'   # 5:00 PM ET

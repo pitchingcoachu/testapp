@@ -111,6 +111,44 @@ order_session_rows <- function(df) {
     )
 }
 
+parse_timecode_seconds <- function(value) {
+  if (is.null(value)) return(numeric(0))
+  raw <- trimws(as.character(value))
+  res <- rep(NA_real_, length(raw))
+  non_empty <- nzchar(raw) & !is.na(raw)
+  if (!any(non_empty)) return(res)
+  normalized <- gsub(",", ".", raw[non_empty], fixed = TRUE)
+  for (idx in seq_along(normalized)) {
+    parts <- strsplit(normalized[[idx]], ":", fixed = TRUE)[[1]]
+    parts <- parts[nzchar(parts)]
+    if (!length(parts)) {
+      next
+    }
+    parsed <- suppressWarnings(as.numeric(parts))
+    if (any(is.na(parsed))) {
+      next
+    }
+    total <- 0
+    len <- length(parsed)
+    if (len >= 1) total <- parsed[len]
+    if (len >= 2) total <- total + parsed[len - 1] * 60
+    if (len >= 3) total <- total + parsed[len - 2] * 3600
+    res_idx <- which(non_empty)[idx]
+    res[res_idx] <- total
+  }
+  res
+}
+
+format_seconds_for_ffmpeg <- function(seconds) {
+  secs <- as.numeric(seconds)
+  if (!is.finite(secs) || secs < 0) secs <- 0
+  hours <- floor(secs / 3600)
+  remaining <- secs - hours * 3600
+  minutes <- floor(remaining / 60)
+  secs_frac <- remaining - minutes * 60
+  sprintf("%02d:%02d:%06.3f", hours, minutes, secs_frac)
+}
+
 VIDEO_MAP_TABLE_COLUMNS <- c(
   "session_id", "play_id", "camera_slot", "camera_name", "camera_target",
   "video_type", "azure_blob", "azure_md5", "cloudinary_url", "cloudinary_public_id",

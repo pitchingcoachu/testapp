@@ -19,7 +19,7 @@ library(memoise)  # for caching expensive computations in Custom Reports
 library(shinymanager)  # for custom authentication with cool login page
 # --- media uploads (Cloudinary) ---
 # raise upload size if needed (50 MB here)
-options(shiny.maxRequestSize = 50 * 1024^2)
+options(shiny.maxRequestSize = 4 * 1024^3)
 
 # Set default plotting background to transparent
 options(shiny.plot.res = 96)
@@ -5226,6 +5226,32 @@ ALL_ALLOWED_HITTERS  <- unique(c(ALLOWED_HITTERS_DL,  ALLOWED_CAMPERS_DL))
 
 # Robust, case/spacing/punctuation-insensitive filter
 allowed_norm <- norm_name_ci(ALL_ALLOWED_PITCHERS)
+
+workload_filter_players_by_team <- function(names, team_type = "All") {
+  names <- stats::na.omit(as.character(names))
+  if (!length(names)) return(character(0))
+  team_type <- team_type %||% "All"
+  if (!nzchar(team_type) || identical(team_type, "All")) {
+    return(sort(unique(names)))
+  }
+  norm_names <- norm_name_ci(names)
+  campers_norm <- norm_name_ci(ALLOWED_CAMPERS_DL)
+  pitchers_norm <- norm_name_ci(ALLOWED_PITCHERS_DL)
+  known_norm <- unique(c(campers_norm, pitchers_norm))
+  if (team_type == "Campers") {
+    mask <- norm_names %in% campers_norm
+  } else if (team_type == TEAM_CODE) {
+    mask <- norm_names %in% pitchers_norm
+  } else if (team_type == "Opponents") {
+    mask <- !(norm_names %in% known_norm)
+  } else {
+    mask <- rep(TRUE, length(norm_names))
+  }
+  res <- names[mask]
+  res <- res[!is.na(res)]
+  sort(unique(res))
+}
+
 pitch_data_pitching <- pitch_data_pitching %>%
   dplyr::mutate(.norm_raw  = norm_name_ci(Pitcher),
                 .norm_disp = norm_name_ci(.disp)) %>%
@@ -6482,6 +6508,11 @@ pitch_ui <- function(show_header = FALSE) {
             div(style = "margin: 8px 0;", uiOutput("summaryTableButtons")),
             DT::dataTableOutput("summaryTablePage")
           ),
+          tabPanel(
+            "Workload",
+            workload_panel_ui()
+          ),
+
           # --- Pitching → AB Report tab ---
           tabPanel(
             "AB Report",
@@ -17679,6 +17710,26 @@ video_upload_ui <- function() {
           actionButton("video_upload_submit", "Click to Upload", class = "btn-success"),
           br(), br(),
           uiOutput("video_upload_upload_status")
+        ),
+        wellPanel(
+          h4("Upload Full-Game Video"),
+          fileInput("video_upload_full_game_video", NULL,
+                    multiple = FALSE,
+                    accept = c(".mp4", ".mov", ".avi", ".mkv"),
+                    buttonLabel = "Select video"),
+          textInput(
+            "video_upload_full_game_start_time",
+            "First clip start time (HH:MM:SS.sss)",
+            value = "00:00:00"
+          ),
+          tags$small(
+            "Provide the point in the raw video that matches the first Time entry in the CSV. ",
+            "The Time column drives the offsets, and each generated clip is 6 seconds long."
+          ),
+          br(),
+          actionButton("video_upload_full_game_submit", "Upload Full Game Video", class = "btn-warning"),
+          br(), br(),
+          uiOutput("video_upload_full_game_status")
         )
       ),
       column(
@@ -17692,6 +17743,82 @@ video_upload_ui <- function() {
     )
   )
 }
+
+workload_panel_ui <- function() {
+  fluidRow(
+    column(
+      width = 12,
+      uiOutput("workload_table")
+    )
+  )
+}
+
+workload_data_dir <- function() file.path("data")
+
+ensure_workload_data_dir <- function() {
+  dir.create(workload_data_dir(), showWarnings = FALSE, recursive = TRUE)
+}
+
+workload_manual_entries_path <- function() file.path(workload_data_dir(), "workload_manual_entries.csv")
+
+load_workload_manual_entries <- function() {
+  ensure_workload_data_dir()
+  path <- workload_manual_entries_path()
+  if (!file.exists(path)) {
+    return(tibble::tibble(
+      pitcher = character(),
+      date = as.Date(character()),
+      throws = double(),
+      type_code = character(),
+      manual_throws = double(),
+      color = character(),
+      updated_at = character()
+    ))
+  }
+  df <- readr::read_csv(
+    path,
+    col_types = readr::cols(.default = readr::col_guess()),
+    show_col_types = FALSE
+  )
+  if (!"pitcher" %in% names(df)) df$pitcher <- character(nrow(df))
+  if (!"date" %in% names(df)) df$date <- as.Date(NA_real_)[seq_len(nrow(df))]
+  if (!"throws" %in% names(df)) df$throws <- NA_real_
+  if (!"type_code" %in% names(df)) df$type_code <- character(nrow(df))
+  if (!"manual_throws" %in% names(df)) df$manual_throws <- NA_real_
+  if (!"color" %in% names(df)) df$color <- NA_character_
+  if (!"updated_at" %in% names(df)) df$updated_at <- character(nrow(df))
+  df %>% dplyr::mutate(
+    type_code = type_code %||% "",
+    color = color %||% NA_character_
+  )
+}
+
+save_workload_manual_entries <- function(entries) {
+  ensure_workload_data_dir()
+  readr::write_csv(entries, workload_manual_entries_path())
+}
+
+workload_session_bucket <- function(session_type) {
+  st <- tolower(as.character(session_type))
+  st[is.na(st)] <- ""
+  res <- rep("Other", length(st))
+  if (!length(res)) return(character(0))
+  live_mask <- grepl("live|game|scrimmage|match", st)
+  bullpen_mask <- grepl("bullpen|bp|throwing|flat|longtoss|long toss", st)
+  catch_mask <- grepl("catch|warmup|recovery|partner|long toss|longtoss", st)
+  res[live_mask] <- "Live"
+  res[bullpen_mask] <- "Bullpen"
+  res[catch_mask] <- "Catch"
+  res
+}
+
+workload_session_bucket_weights <- c(
+  Live = 1.0,
+  Bullpen = 0.8,
+  Catch = 0.45,
+  Other = 0.7
+)
+
 # ==================================
 # == AUTHENTICATION SETUP ==
 # ==================================
@@ -19164,6 +19291,7 @@ server <- function(input, output, session) {
   video_sessions <- reactiveVal(load_video_assignments())
   video_feedback <- reactiveVal(NULL)
   video_upload_upload_feedback <- reactiveVal(NULL)
+  video_full_game_feedback <- reactiveVal(NULL)
 
   build_team_label <- function(home, away) {
     mapply(function(h, a) {
@@ -19256,10 +19384,15 @@ server <- function(input, output, session) {
   observeEvent(input$video_session, {
     video_feedback(NULL)
     video_upload_upload_feedback(NULL)
+    video_full_game_feedback(NULL)
   }, ignoreInit = TRUE)
 
   observeEvent(input$video_upload_files, {
     video_upload_upload_feedback(NULL)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$video_upload_full_game_video, {
+    video_full_game_feedback(NULL)
   }, ignoreInit = TRUE)
 
   observeEvent(input$video_register, {
@@ -19361,6 +19494,114 @@ server <- function(input, output, session) {
     })
   }, ignoreNULL = TRUE)
 
+  observeEvent(input$video_upload_full_game_submit, {
+    video_full_game_feedback(NULL)
+    req(input$video_session)
+    file_info <- input$video_upload_full_game_video
+    if (is.null(file_info) || !nrow(file_info)) {
+      video_full_game_feedback(list(type = "error",
+                                    text = "Attach a video before uploading."))
+      return()
+    }
+    start_seconds <- parse_timecode_seconds(input$video_upload_full_game_start_time)[1]
+    if (is.na(start_seconds)) {
+      video_full_game_feedback(list(type = "error",
+                                    text = "First clip start time is not a valid HH:MM:SS value."))
+      return()
+    }
+    ffmpeg_path <- Sys.which("ffmpeg")
+    if (!nzchar(ffmpeg_path)) {
+      video_full_game_feedback(list(type = "error",
+                                    text = "ffmpeg is not available; install it to generate clips."))
+      return()
+    }
+    session_rows <- find_session_rows(data_parent, input$video_session)
+    if (!nrow(session_rows)) {
+      video_full_game_feedback(list(type = "error",
+                                    text = "Could not resolve that TrackMan session."))
+      return()
+    }
+    if (!"Time" %in% names(session_rows)) {
+      video_full_game_feedback(list(type = "error",
+                                    text = "Session CSV is missing the Time column."))
+      return()
+    }
+    time_values <- parse_timecode_seconds(session_rows$Time)
+    valid_mask <- !is.na(time_values)
+    if (!any(valid_mask)) {
+      video_full_game_feedback(list(type = "error",
+                                    text = "No valid Time values were found for that session."))
+      return()
+    }
+    skipped <- sum(!valid_mask)
+    ordered_rows <- session_rows[valid_mask, , drop = FALSE]
+    ordered_rows$time_seconds <- time_values[valid_mask]
+    ordered_rows <- ordered_rows %>%
+      dplyr::arrange(time_seconds, PlayID)
+    if (!nrow(ordered_rows)) {
+      video_full_game_feedback(list(type = "error",
+                                    text = "No pitches with valid Time data remain for clipping."))
+      return()
+    }
+    clip_count <- nrow(ordered_rows)
+    clip_duration <- 6
+    video_path <- file_info$datapath[1]
+    uploads <- vector("list", clip_count)
+    tryCatch({
+      withProgress(message = "Generating clips from full game", value = 0, {
+        for (i in seq_len(clip_count)) {
+          clip_offset <- start_seconds +
+            (ordered_rows$time_seconds[i] - ordered_rows$time_seconds[1])
+          if (clip_offset < 0) clip_offset <- 0
+          clip_path <- tempfile(fileext = ".mp4")
+          tryCatch({
+            ffmpeg_args <- c(
+              "-ss", format_seconds_for_ffmpeg(clip_offset),
+              "-i", video_path,
+              "-t", as.character(clip_duration),
+              "-c", "copy",
+              "-avoid_negative_ts", "make_zero",
+              "-y", clip_path
+            )
+            ffmpeg_output <- system2(ffmpeg_path, ffmpeg_args, stdout = FALSE, stderr = TRUE)
+            ffmpeg_status <- attr(ffmpeg_output, "status")
+            if (!is.null(ffmpeg_status) && ffmpeg_status != 0) {
+              reason <- paste(ffmpeg_output, collapse = "\n")
+              stop(paste0("ffmpeg failed for clip ", i, ": ", reason))
+            }
+            upload_result <- upload_media_cloudinary(clip_path)
+            uploads[[i]] <- tibble::tibble(
+              file_name = paste0("clip-", ordered_rows$PlayID[i], ".mp4"),
+              cloudinary_url = upload_result$url,
+              cloudinary_public_id = upload_result$public_id
+            )
+          }, finally = {
+            if (file.exists(clip_path)) unlink(clip_path)
+          })
+          incProgress(1 / clip_count, detail = sprintf("Clip %d/%d", i, clip_count))
+        }
+      })
+      manifest <- dplyr::bind_rows(uploads)
+      map_manifest_to_session(
+        session_rows = ordered_rows,
+        manifest = manifest,
+        session_id = input$video_session,
+        slot = "VideoClip2",
+        name = "ManualCamera",
+        target = "ManualUpload",
+        type = "ManualVideo",
+        map_path = file.path("data", "video_map.csv")
+      )
+      success_text <- paste0("Generated and uploaded ", nrow(manifest), " clips from the full-game video.")
+      if (skipped > 0) {
+        success_text <- paste0(success_text, " Skipped ", skipped, " pitches without Time data.")
+      }
+      video_full_game_feedback(list(type = "success", text = success_text))
+    }, error = function(err) {
+      video_full_game_feedback(list(type = "error", text = err$message))
+    })
+  }, ignoreNULL = TRUE)
+
   output$video_upload_status <- renderUI({
     msg <- video_feedback()
     if (is.null(msg)) return(NULL)
@@ -19370,6 +19611,13 @@ server <- function(input, output, session) {
 
   output$video_upload_upload_status <- renderUI({
     msg <- video_upload_upload_feedback()
+    if (is.null(msg)) return(NULL)
+    cls <- if (identical(msg$type, "error")) "alert alert-danger" else "alert alert-success"
+    tags$div(class = cls, style = "margin-top:8px;", msg$text)
+  })
+
+  output$video_upload_full_game_status <- renderUI({
+    msg <- video_full_game_feedback()
     if (is.null(msg)) return(NULL)
     cls <- if (identical(msg$type, "error")) "alert alert-danger" else "alert alert-success"
     tags$div(class = cls, style = "margin-top:8px;", msg$text)
@@ -19402,6 +19650,450 @@ server <- function(input, output, session) {
     )
   })
   
+  # --- Workload module ---
+  workload_manual_entries <- reactiveVal(load_workload_manual_entries())
+  workload_type_defaults <- list(
+    Off = list(throws = 0, label = "Off (No throwing)"),
+    F = list(throws = 25, label = "Low (Recovery)"),
+    D = list(throws = 40, label = "Medium (Normal Catch)"),
+    C = list(throws = 40, label = "Medium (w/ Touch and Feel)"),
+    B = list(throws = 60, label = "High (Long Toss)"),
+    `B+` = list(throws = 75, label = "Bullpen (Moderate Intent)"),
+    A = list(throws = 75, label = "Bullpen (High Intent)"),
+    `A+` = list(throws = NA, label = "Live Pitching")
+  )
+  workload_type_weights <- c(
+    Off = 0,
+    F = 0.55,
+    D = 0.75,
+    C = 0.80,
+    B = 0.90,
+    `B+` = 0.85,
+    A = 0.95,
+    `A+` = 1.00
+  )
+  workload_type_colors <- c(
+    Off = "#6c757d",
+    F = "#dc3545",
+    D = "#ffc107",
+    C = "#ffc107",
+    B = "#198754",
+    `B+` = "#198754",
+    A = "#198754",
+    `A+` = "#198754"
+  )
+  workload_type_throw_defaults <- vapply(
+    workload_type_defaults,
+    function(x) x$throws,
+    numeric(1)
+  )
+  workload_type_labels <- vapply(
+    workload_type_defaults,
+    function(x) x$label,
+    character(1)
+  )
+
+  workload_max_date <- reactive({
+    req(exists("pitch_data_pitching"))
+    dates <- as.Date(pitch_data_pitching$Date)
+    dates <- dates[!is.na(dates)]
+    if (length(dates)) max(dates) else Sys.Date()
+  })
+
+  workload_date_range <- reactive({
+    seq.Date(Sys.Date() - 27, Sys.Date(), by = "day")
+  })
+
+  workload_display_dates <- reactive({
+    workload_date_range()
+  })
+
+  workload_daily_summary <- reactive({
+    req(exists("pitch_data_pitching"))
+    df <- pitch_data_pitching %>%
+      dplyr::filter(!is.na(Pitcher)) %>%
+      dplyr::mutate(Date = as.Date(Date))
+    if (!nrow(df)) {
+      return(tibble::tibble(
+        Pitcher = character(),
+        Date = as.Date(character()),
+        throws = double(),
+        session_breakdown = character(),
+        session_factor = double(),
+        avg_velo = double()
+      ))
+    }
+    counts <- df %>%
+      dplyr::mutate(bucket = workload_session_bucket(SessionType)) %>%
+      dplyr::group_by(Pitcher, Date, bucket) %>%
+      dplyr::summarise(count = dplyr::n(), .groups = "drop")
+    session_summary <- counts %>%
+      dplyr::group_by(Pitcher, Date) %>%
+      dplyr::summarise(
+        throws = sum(count),
+        session_breakdown = paste(sprintf("%s: %d", bucket, count), collapse = "; "),
+        session_factor = if (throws > 0) {
+          sum(count * unname(workload_session_bucket_weights[bucket]), na.rm = TRUE) / throws
+        } else {
+          0.7
+        },
+        dominant_bucket = bucket[which.max(count)],
+        .groups = "drop"
+      )
+    velo_summary <- df %>%
+      dplyr::group_by(Pitcher, Date) %>%
+      dplyr::summarise(avg_velo = mean(RelSpeed, na.rm = TRUE), .groups = "drop")
+    dplyr::left_join(session_summary, velo_summary, by = c("Pitcher", "Date"))
+  })
+
+  workload_table_info <- reactive({
+    req(exists("pitch_data_pitching"))
+    team_type <- input$teamType %||% "All"
+    raw_players <- sort(unique(stats::na.omit(pitch_data_pitching$Pitcher)))
+    manual_raw <- workload_manual_entries() %>%
+      dplyr::mutate(date = as.Date(date))
+    candidate_players <- sort(unique(stats::na.omit(c(raw_players, manual_raw$pitcher))))
+    players <- workload_filter_players_by_team(candidate_players, team_type)
+    if (!length(players)) {
+      return(list(
+        df = tibble::tibble(),
+        dates = workload_date_range(),
+        type_grid = tibble::tibble(Pitcher = character()),
+        manual_grid = tibble::tibble(Pitcher = character()),
+        type_cols = character(),
+        type_labels = workload_type_labels
+      ))
+    }
+    display_dates <- rev(workload_date_range())
+    manual_entries <- manual_raw %>%
+      dplyr::filter(pitcher %in% players) %>%
+      dplyr::rename(
+        manual_type = type_code,
+        manual_live_throws = manual_throws
+      ) %>%
+      dplyr::select(pitcher, date, manual_type, manual_live_throws)
+    base <- tidyr::expand_grid(Pitcher = players, Date = display_dates)
+    daily_summary <- workload_daily_summary()
+    combined <- base %>%
+      dplyr::left_join(daily_summary, by = c("Pitcher", "Date")) %>%
+      dplyr::left_join(manual_entries, by = c("Pitcher" = "pitcher", "Date" = "date"))
+    overall_velo <- mean(pitch_data_pitching$RelSpeed, na.rm = TRUE)
+    if (!is.finite(overall_velo)) overall_velo <- 90
+    combined <- combined %>%
+      dplyr::mutate(
+        tracked_throws = dplyr::coalesce(throws, 0),
+        inferred_type = dplyr::case_when(
+          dominant_bucket == "Live" & tracked_throws > 0 ~ "A+",
+          dominant_bucket == "Bullpen" & tracked_throws > 0 ~ "A",
+          TRUE ~ NA_character_
+        ),
+        selected_type = dplyr::coalesce(
+          dplyr::na_if(manual_type, ""),
+          inferred_type
+        ),
+        selected_type = dplyr::coalesce(selected_type, ""),
+        manual_live_throws = ifelse(selected_type %in% c("B+", "A", "A+"),
+          manual_live_throws, NA_real_
+        ),
+        default_throws = workload_type_throw_defaults[selected_type],
+        intensity_weight = workload_type_weights[selected_type] %||% 0.75,
+        manual_color = workload_type_colors[selected_type] %||% NA_character_,
+        throw_count = dplyr::case_when(
+          selected_type == "A+" & tracked_throws > 0 ~ tracked_throws,
+          selected_type == "A+" & !is.na(manual_live_throws) ~ manual_live_throws,
+          selected_type %in% c("B+", "A") & !is.na(manual_live_throws) ~ manual_live_throws,
+          !is.na(default_throws) ~ default_throws,
+          TRUE ~ tracked_throws
+        ),
+        session_breakdown = dplyr::coalesce(session_breakdown, "Tracked work"),
+        session_description = ifelse(!is.na(manual_live_throws),
+          paste0("Manual entry: ", manual_live_throws), session_breakdown
+        ),
+        session_factor = dplyr::coalesce(session_factor, 0.75),
+        avg_velo = dplyr::coalesce(avg_velo, overall_velo),
+        velo_adjust = 1 + pmax(0, (avg_velo - 85)) / 40,
+        stress = throw_count * intensity_weight * session_factor * velo_adjust
+      )
+    max_date <- workload_max_date()
+    per_player <- combined %>%
+      dplyr::group_by(Pitcher) %>%
+      dplyr::summarise(
+        acute = mean(stress[Date >= max_date - 6], na.rm = TRUE),
+        chronic = mean(stress[Date >= max_date - 27], na.rm = TRUE),
+        recent_throws = mean(throw_count[Date >= max_date - 2], na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(
+        acute = ifelse(is.na(acute), 0, acute),
+        chronic = ifelse(is.na(chronic), 0, chronic),
+        live_center = ifelse(is.na(recent_throws), 0, recent_throws),
+        live_center = round(live_center),
+        ac_ratio = ifelse(chronic > 0, acute / chronic, NA_real_),
+        live_pitch_range = paste0(
+          pmax(0, live_center - 5),
+          "-",
+          live_center + 5
+        )
+      ) %>%
+      dplyr::transmute(
+        Pitcher,
+        ac_ratio,
+        live_pitch_range
+      )
+    ordered_dates <- display_dates
+    type_wide <- combined %>%
+      dplyr::filter(Date %in% ordered_dates) %>%
+      dplyr::mutate(Date = factor(Date, levels = ordered_dates)) %>%
+      dplyr::select(Pitcher, Date, selected_type) %>%
+      tidyr::pivot_wider(names_from = Date, values_from = selected_type) %>%
+      dplyr::mutate(dplyr::across(-Pitcher, ~dplyr::coalesce(., "")))
+    manual_live_wide <- combined %>%
+      dplyr::filter(Date %in% ordered_dates) %>%
+      dplyr::mutate(Date = factor(Date, levels = ordered_dates)) %>%
+      dplyr::select(Pitcher, Date, manual_live_throws) %>%
+      tidyr::pivot_wider(names_from = Date, values_from = manual_live_throws)
+    table_df <- per_player %>%
+      dplyr::rename(
+        Player = Pitcher,
+        `AC Ratio` = ac_ratio,
+        `Live Pitch Range` = live_pitch_range
+      )
+    selected <- input$pitcher %||% "All"
+    if (!identical(selected, "All") && selected %in% table_df$Player) {
+      table_df <- table_df %>% dplyr::filter(Player == selected)
+    }
+    list(
+      df = table_df,
+      dates = display_dates,
+      type_grid = type_wide,
+      manual_grid = manual_live_wide,
+      type_cols = names(type_wide)[names(type_wide) != "Pitcher"],
+      type_labels = workload_type_labels
+    )
+  })
+
+  output$workload_table <- renderUI({
+    info <- workload_table_info()
+    if (!nrow(info$df)) {
+      return(tags$div("No workload data available", style = "font-style:italic;"))
+    }
+    type_labels <- info$type_labels
+    type_lookup <- setNames(
+      lapply(seq_len(nrow(info$type_grid)), function(idx) {
+        as.character(unlist(info$type_grid[idx, info$type_cols, drop = FALSE]))
+      }),
+      info$type_grid$Pitcher
+    )
+    manual_lookup <- setNames(
+      lapply(seq_len(nrow(info$manual_grid)), function(idx) {
+        as.numeric(unlist(info$manual_grid[idx, info$type_cols, drop = FALSE]))
+      }),
+      info$manual_grid$Pitcher
+    )
+    header_cells <- c(
+      list(tags$th("Player"), tags$th("AC Ratio"), tags$th("Live Pitch Range")),
+      lapply(info$dates, function(dt) tags$th(format(dt, "%-m/%-d")))
+    )
+    rows <- lapply(seq_len(nrow(info$df)), function(row_idx) {
+      player <- info$df$Player[row_idx]
+      ac_val <- info$df$`AC Ratio`[row_idx]
+      ac_style <- if (is.na(ac_val)) {
+        ""
+      } else if (ac_val < 0.7 || ac_val > 1.3) {
+        "background:#f8d7da;"
+      } else {
+        "background:#d4efdf;"
+      }
+      live_range <- info$df$`Live Pitch Range`[row_idx]
+      type_row <- type_lookup[[player]] %||% rep("", length(info$type_cols))
+      manual_row <- manual_lookup[[player]] %||% rep(NA_real_, length(info$type_cols))
+      date_cells <- lapply(seq_along(info$type_cols), function(idx) {
+        dt <- info$dates[idx]
+        type_val <- type_row[[idx]] %||% ""
+        manual_val <- manual_row[[idx]]
+        manual_enabled <- type_val %in% c("B+", "A", "A+")
+        select_tag <- tags$select(
+          class = "workload-type-select form-select form-select-sm",
+          style = "width:120px;",
+          `data-player` = player,
+          `data-date` = format(dt, "%Y-%m-%d"),
+          onchange = "workloadTypeChange(this)"
+        )
+        option_list <- list(
+          tags$option(value = "", selected = type_val == "", "Select type")
+        )
+        option_list <- c(option_list, lapply(names(type_labels), function(code) {
+          tags$option(
+            value = code,
+            selected = identical(code, type_val),
+            type_labels[[code]]
+          )
+        }))
+        select_tag <- tagAppendChildren(select_tag, option_list)
+        manual_input <- tags$input(
+          type = "number",
+          class = "workload-manual-input form-control form-control-sm",
+          style = "width:90px; margin-top:4px;",
+          min = 0,
+          step = 1,
+          placeholder = "Manual throws",
+          value = if (manual_enabled && !is.na(manual_val)) manual_val else "",
+          `data-player` = player,
+          `data-date` = format(dt, "%Y-%m-%d"),
+          disabled = if (!manual_enabled) "disabled" else NULL,
+          onchange = "workloadManualChange(this)"
+        )
+        tags$td(
+          style = "min-width:160px; padding:8px; text-align:center; vertical-align:middle;",
+          tags$div(select_tag),
+          tags$div(
+            style = "margin-top:2px;",
+            tags$small("Manual for bullpen/live"),
+            manual_input
+          )
+        )
+      })
+      tags$tr(
+        tags$td(player, style = "text-align:center; vertical-align:middle;"),
+        tags$td(style = paste0(ac_style, " text-align:center; vertical-align:middle;"), if (is.na(ac_val)) "\u2014" else sprintf("%.2f", ac_val)),
+        tags$td(live_range, style = "text-align:center; vertical-align:middle;"),
+        date_cells
+      )
+    })
+    style_block <- tags$style(HTML("
+      .workload-table th, .workload-table td { text-align:center; vertical-align:middle; color:#000; }
+      .workload-table .form-select, .workload-table .form-control { text-align:center; color:#000; }
+      .workload-table .form-select option { color:#000; }
+      .workload-table tbody tr { background-color: transparent; }
+      .workload-table tbody tr:nth-of-type(odd) { background-color: rgba(0, 0, 0, 0.02); }
+      body.theme-dark .workload-table.table-striped tbody tr:nth-of-type(odd) { background-color: rgba(255, 255, 255, 0.04) !important; }
+      body.theme-dark .workload-table.table-striped tbody tr:nth-of-type(even) { background-color: rgba(255, 255, 255, 0.02) !important; }
+      body.theme-dark .workload-table th, body.theme-dark .workload-table td { border-color: rgba(255, 255, 255, 0.15); color:#000; }
+    "))
+    script <- tags$script(HTML("
+      (function() {
+        function toggleManual(select) {
+          var player = select.dataset.player;
+          var date = select.dataset.date;
+          var manual = document.querySelector('input.workload-manual-input[data-player=\"' + player + '\"][data-date=\"' + date + '\"]');
+          var enabled = ['B+','A','A+'].includes(select.value);
+          if (manual) {
+            manual.disabled = !enabled;
+            if (!enabled && manual.value !== '') manual.value = '';
+          }
+        }
+        window.workloadTypeChange = function(select) {
+          toggleManual(select);
+          Shiny.setInputValue('workload_day_type', {
+            player: select.dataset.player,
+            date: select.dataset.date,
+            type: select.value
+          }, {priority: 'event'});
+        };
+        window.workloadManualChange = function(input) {
+          var value = parseFloat(input.value);
+          var throwsValue = isFinite(value) ? value : null;
+          Shiny.setInputValue('workload_day_manual', {
+            player: input.dataset.player,
+            date: input.dataset.date,
+            throws: throwsValue
+          }, {priority: 'event'});
+        };
+        window.workloadInitializeSelectors = function() {
+          document.querySelectorAll('select.workload-type-select').forEach(function(select) {
+            toggleManual(select);
+          });
+        };
+        document.addEventListener('DOMContentLoaded', window.workloadInitializeSelectors);
+        if (document.readyState === 'complete') {
+          window.workloadInitializeSelectors();
+        }
+        window.workloadInitializeSelectors();
+      })();
+    "))
+    header_row <- do.call(tags$tr, header_cells)
+    body_rows <- do.call(tagList, rows)
+    tags$div(
+      style_block,
+      tags$div(
+        class = "table-responsive",
+        tags$table(
+          class = "table table-striped table-bordered workload-table",
+          tags$thead(header_row),
+          tags$tbody(body_rows)
+        )
+      ),
+      script
+    )
+  })
+
+  observeEvent(input$workload_day_type, {
+    evt <- input$workload_day_type
+    if (is.null(evt$player) || is.null(evt$date)) return()
+    date_val <- suppressWarnings(as.Date(evt$date))
+    if (is.na(date_val)) return()
+    type_code <- evt$type %||% ""
+    manual <- workload_manual_entries()
+    existing <- manual %>%
+      dplyr::filter(pitcher == evt$player & date == date_val)
+    manual <- manual %>% dplyr::filter(!(pitcher == evt$player & date == date_val))
+    if (!nzchar(type_code)) {
+      workload_manual_entries(manual)
+      save_workload_manual_entries(manual)
+      return()
+    }
+    existing_throw <- if (nrow(existing)) existing$throws[1] else NA_real_
+    manual_throws <- if (nrow(existing)) existing$manual_throws[1] else NA_real_
+    existing_color <- if (nrow(existing)) existing$color[1] else NA_character_
+    manual <- dplyr::bind_rows(
+      manual,
+      tibble::tibble(
+        pitcher = evt$player,
+        date = date_val,
+        throws = existing_throw,
+        type_code = type_code,
+        manual_throws = manual_throws,
+        color = existing_color,
+        updated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+      )
+    )
+    workload_manual_entries(manual)
+    save_workload_manual_entries(manual)
+  }, ignoreNULL = TRUE)
+
+  observeEvent(input$workload_day_manual, {
+    evt <- input$workload_day_manual
+    if (is.null(evt$player) || is.null(evt$date)) return()
+    date_val <- suppressWarnings(as.Date(evt$date))
+    if (is.na(date_val)) return()
+    throws_val <- evt$throws
+    manual <- workload_manual_entries()
+    existing <- manual %>%
+      dplyr::filter(pitcher == evt$player & date == date_val)
+    manual <- manual %>% dplyr::filter(!(pitcher == evt$player & date == date_val))
+    type_code <- if (nrow(existing)) existing$type_code[1] else "A+"
+    existing_throw <- if (nrow(existing)) existing$throws[1] else NA_real_
+    existing_color <- if (nrow(existing)) existing$color[1] else NA_character_
+    if (!type_code %in% c("B+", "A", "A+")) {
+      type_code <- "A+"
+    }
+    manual_throws <- if (is.null(throws_val) || is.na(throws_val)) NA_real_ else throws_val
+    manual <- dplyr::bind_rows(
+      manual,
+      tibble::tibble(
+        pitcher = evt$player,
+        date = date_val,
+        throws = existing_throw,
+        type_code = type_code,
+        manual_throws = manual_throws,
+        color = existing_color,
+        updated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+      )
+    )
+    workload_manual_entries(manual)
+    save_workload_manual_entries(manual)
+  }, ignoreNULL = TRUE)
+
   # --- panel ---
   build_metrics_panel <- function(row) {
     # Name (First Last) and Date

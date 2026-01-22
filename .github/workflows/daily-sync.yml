@@ -41,6 +41,10 @@ jobs:
           libxcb1 \
           libicu-dev \
           libcairo2-dev \
+          libgdk-pixbuf2.0-dev \
+          libpango1.0-dev \
+          librsvg2-dev \
+          pkg-config \
           libgdal-dev \
           libgeos-dev \
           libproj-dev \

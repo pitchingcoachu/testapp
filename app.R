@@ -15092,6 +15092,7 @@ custom_reports_ui <- function(id) {
                    h4("Report Setup"),
                    textInput(ns("report_title"), "Report Title", ""),
                    selectInput(ns("report_type"), "Report Type:", choices = c("Pitching","Hitting"), selected = "Pitching"),
+                   selectInput(ns("report_team"), "Team:", choices = TEAM_CHOICES, selected = "All"),
                    selectInput(ns("report_scope"), "Scope:", choices = c("Single Player","Multi-Player"), selected = "Single Player"),
                    # Single Player mode - show player selector
                    conditionalPanel(
@@ -15139,6 +15140,35 @@ custom_reports_server <- function(id) {
       if (inherits(val, "try-error")) FALSE else isTRUE(val)
     })
     
+    get_team_filtered_players <- function(report_type, team_type) {
+      team_type <- team_type %||% "All"
+      switch(report_type,
+        "Pitching" = {
+          pool <- unique(stats::na.omit(c(pitch_data_pitching$Pitcher, pitch_data$Pitcher)))
+          pool <- pool[nzchar(pool)]
+          if (team_type == "Campers") {
+            sort(intersect(ALLOWED_CAMPERS, pool))
+          } else if (team_type == TEAM_CODE) {
+            sort(intersect(ALLOWED_PITCHERS, pool))
+          } else {
+            sort(pool)
+          }
+        },
+        "Hitting" = {
+          pool <- unique(stats::na.omit(c(pitch_data$Batter, pitch_data_pitching$Batter)))
+          pool <- pool[nzchar(pool)]
+          if (team_type == "Campers") {
+            sort(intersect(ALLOWED_CAMPERS, pool))
+          } else if (team_type == TEAM_CODE) {
+            sort(intersect(ALLOWED_HITTERS, pool))
+          } else {
+            sort(pool)
+          }
+        },
+        character(0)
+      )
+    }
+    
     output$report_global_toggle <- renderUI({
       if (!isTRUE(is_admin_local())) return(NULL)
       checkboxInput(ns("report_global"), "Share with all schools (admin)", value = FALSE)
@@ -15177,30 +15207,25 @@ custom_reports_server <- function(id) {
     })
     
     # Populate players based on type (for Single Player mode)
-    observeEvent(input$report_type, {
-      if (input$report_type == "Pitching") {
-        players <- sort(unique(stats::na.omit(c(pitch_data_pitching$Pitcher, pitch_data$Pitcher))))
-      } else {
-        # For hitting, get batters from pitch_data
-        batters <- unique(stats::na.omit(as.character(pitch_data$Batter)))
-        batters <- batters[nzchar(batters)]  # Remove empty strings
-        players <- sort(batters)
-      }
+    observe({
+      req(input$report_type, input$report_team)
+      players <- get_team_filtered_players(input$report_type, input$report_team)
       
-      # Update the main player selector (Single Player mode) - add "All" option
+      player_choices <- c("All" = "All", setNames(players, players))
+      # Update the main player selector (Single Player mode)
       updateSelectizeInput(session, "report_players",
-                           choices = c("All", players),
-                           selected = "All",  # Default to All
+                           choices = player_choices,
+                           selected = "All",
                            server = TRUE)
       
-      # Update all row player selectors (Multi-Player mode) - add "All" option
+      # Update all row player selectors (Multi-Player mode) with filtered players
       for (r in 1:15) {
         selector_id <- paste0("row_player_", r)
         updateSelectizeInput(session, selector_id,
                              choices = c("", "All", players),
                              server = TRUE)
       }
-    }, ignoreInit = FALSE)
+    })
     
     # Load saved report
     observeEvent(input$saved_report, {
@@ -15221,6 +15246,7 @@ custom_reports_server <- function(id) {
       
       # THEN: Update all UI elements (this will trigger renderUI which reads from current_cells)
       updateTextInput(session, "report_title", value = rep$title %||% "")
+      updateSelectInput(session, "report_team", selected = rep$team %||% "All")
       updateSelectInput(session, "report_type", selected = rep$type %||% "Pitching")
       updateSelectInput(session, "report_scope", selected = rep$scope %||% "Single Player")
       updateSelectizeInput(session, "report_players", selected = rep$players %||% character(0))
@@ -15326,11 +15352,7 @@ custom_reports_server <- function(id) {
       rows <- as.integer(input$report_rows)
       if (is.na(rows) || rows < 1) return(NULL)
       
-      players <- if (input$report_type == "Pitching") {
-        sort(unique(stats::na.omit(c(pitch_data_pitching$Pitcher, pitch_data$Pitcher))))
-      } else {
-        sort(unique(stats::na.omit(c(pitch_data$Batter, pitch_data_pitching$Batter))))
-      }
+      players <- get_team_filtered_players(input$report_type, input$report_team)
       
       cells <- current_cells()
       
@@ -15398,6 +15420,7 @@ custom_reports_server <- function(id) {
       rep <- list(
         title = nm,
         type = input$report_type,
+        team = input$report_team %||% "All",
         scope = input$report_scope,
         players = input$report_players,
         rows = as.integer(input$report_rows),
@@ -15432,6 +15455,7 @@ custom_reports_server <- function(id) {
       
       # Reset to defaults
       updateTextInput(session, "report_title", value = "")
+      updateSelectInput(session, "report_team", selected = "All")
       updateSelectInput(session, "report_type", selected = "Pitching")
       updateSelectInput(session, "report_scope", selected = "Single Player")
       updateSelectizeInput(session, "report_players", selected = character(0))
@@ -15973,26 +15997,28 @@ custom_reports_server <- function(id) {
         cell_id
       }
       
+      cell_state <- current_cells()[[filter_cell_id]] %||% list()
+
       get_cell_data(
         cell_id = cell_id,
         players = players,
         report_type = input$report_type,
-        dates = input[[paste0("cell_dates_", filter_cell_id)]],
-        session = input[[paste0("cell_session_", filter_cell_id)]] %||% "All",
-        pitch_types = input[[paste0("cell_pitch_types_", filter_cell_id)]],
-        batter_side = input[[paste0("cell_batter_side_", filter_cell_id)]],
-        pitcher_hand = input[[paste0("cell_pitcher_hand_", filter_cell_id)]],
-        results = input[[paste0("cell_results_", filter_cell_id)]],
-        qp = input[[paste0("cell_qp_", filter_cell_id)]],
-        count = input[[paste0("cell_count_", filter_cell_id)]],
-        after_count = input[[paste0("cell_after_count_", filter_cell_id)]],
-        zone = input[[paste0("cell_zone_", filter_cell_id)]],
-        velo_min = input[[paste0("cell_velo_min_", filter_cell_id)]],
-        velo_max = input[[paste0("cell_velo_max_", filter_cell_id)]],
-        ivb_min = input[[paste0("cell_ivb_min_", filter_cell_id)]],
-        ivb_max = input[[paste0("cell_ivb_max_", filter_cell_id)]],
-        hb_min = input[[paste0("cell_hb_min_", filter_cell_id)]],
-        hb_max = input[[paste0("cell_hb_max_", filter_cell_id)]]
+        dates = input[[paste0("cell_dates_", filter_cell_id)]] %||% cell_state$dates,
+        session = input[[paste0("cell_session_", filter_cell_id)]] %||% cell_state$session %||% "All",
+        pitch_types = input[[paste0("cell_pitch_types_", filter_cell_id)]] %||% cell_state$pitch_types,
+        batter_side = input[[paste0("cell_batter_side_", filter_cell_id)]] %||% cell_state$batter_side,
+        pitcher_hand = input[[paste0("cell_pitcher_hand_", filter_cell_id)]] %||% cell_state$pitcher_hand,
+        results = input[[paste0("cell_results_", filter_cell_id)]] %||% cell_state$results,
+        qp = input[[paste0("cell_qp_", filter_cell_id)]] %||% cell_state$qp,
+        count = input[[paste0("cell_count_", filter_cell_id)]] %||% cell_state$count,
+        after_count = input[[paste0("cell_after_count_", filter_cell_id)]] %||% cell_state$after_count,
+        zone = input[[paste0("cell_zone_", filter_cell_id)]] %||% cell_state$zone,
+        velo_min = input[[paste0("cell_velo_min_", filter_cell_id)]] %||% cell_state$velo_min,
+        velo_max = input[[paste0("cell_velo_max_", filter_cell_id)]] %||% cell_state$velo_max,
+        ivb_min = input[[paste0("cell_ivb_min_", filter_cell_id)]] %||% cell_state$ivb_min,
+        ivb_max = input[[paste0("cell_ivb_max_", filter_cell_id)]] %||% cell_state$ivb_max,
+        hb_min = input[[paste0("cell_hb_min_", filter_cell_id)]] %||% cell_state$hb_min,
+        hb_max = input[[paste0("cell_hb_max_", filter_cell_id)]] %||% cell_state$hb_max
       )
     }
     

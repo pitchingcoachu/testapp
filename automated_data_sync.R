@@ -154,6 +154,7 @@ sync_v3_data <- function() {
   cat("Syncing v3 data with date filtering...\n")
   years <- as.character(2025:year(Sys.Date()))
   downloaded_count <- 0
+  seen_v3_files <- character(0)
   
   for (yr in years) {
     v3_base_path <- paste0("/v3/", yr, "/")
@@ -189,6 +190,14 @@ sync_v3_data <- function() {
           csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
           
           for (file in csv_files) {
+            if (!nzchar(file)) next
+            file_key <- tolower(trimws(file))
+            if (file_key %in% seen_v3_files) {
+              cat("Skipping duplicate v3 CSV suffix:", file, "(already processed)\n")
+              next
+            }
+            seen_v3_files <- c(seen_v3_files, file_key)
+
             remote_path <- paste0(csv_path, file)
             local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", yr, "_", month_dir, "_", day_dir, "_", file))
             
@@ -204,6 +213,14 @@ sync_v3_data <- function() {
           csv_files <- csv_files[!grepl("playerpositioning|unverified", csv_files, ignore.case = TRUE)]
           
           for (file in csv_files) {
+            if (!nzchar(file)) next
+            file_key <- tolower(trimws(file))
+            if (file_key %in% seen_v3_files) {
+              cat("Skipping duplicate v3 CSV suffix:", file, "(already processed)\n")
+              next
+            }
+            seen_v3_files <- c(seen_v3_files, file_key)
+
             remote_path <- paste0(day_path, file)
             local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", yr, "_", month_dir, "_", day_dir, "_", file))
             
